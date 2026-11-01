@@ -1,7 +1,7 @@
 
 name: Build AmneziaWG 3.1 for Keenetic MIPSel
 
-on:
+'on':
   workflow_dispatch:
 
 permissions:
@@ -10,12 +10,28 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout Chur Keenetic
+      # Checkout uses the exact commit that triggered this workflow.
+      - name: Checkout Chur Keenetic source
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Check required Chur source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Chur source commit: $(git rev-parse HEAD)"
+          test -f VERSION
+          test -f Makefile
+          test -f configs/mipsel-3.4.config
+          test -f scripts/entware-build-volume.sh
+          test -f scripts/entware-prepare-tree.sh
+          test -f packaging/entware/chur-amneziawg-tools/Makefile
+          git -C third_party/amneziawg-go rev-parse --is-inside-work-tree >/dev/null
+          mkdir -p dist dist/entware-ipk
 
       - name: Install Go
         uses: actions/setup-go@v5
@@ -23,48 +39,112 @@ jobs:
           go-version: '1.26.1'
           cache: false
 
-      - name: Select AmneziaWG Go 3.1
+      - name: Select and verify AmneziaWG Go 3.1
+        shell: bash
         run: |
           set -euo pipefail
+
+          EXPECTED_GO_COMMIT="b5928efb6ca19f0153958460c3d141f04abc5c2e"
 
           git -C third_party/amneziawg-go fetch --tags --force
-          git -C third_party/amneziawg-go checkout --detach v3.1.20260828
 
-          GO_COMMIT="$(git -C third_party/amneziawg-go rev-parse HEAD)"
-          echo "AMNEZIAWG_GO_COMMIT=$GO_COMMIT" >> "$GITHUB_ENV"
+          TAG_COMMIT="$(git -C third_party/amneziawg-go rev-parse 'v3.1.20260828^{commit}')"
+          test "$TAG_COMMIT" = "$EXPECTED_GO_COMMIT"
 
-          echo "Selected Go commit: $GO_COMMIT"
+          git -C third_party/amneziawg-go checkout --detach "$EXPECTED_GO_COMMIT"
 
-      - name: Select AmneziaWG Tools 3.1
+          ACTUAL_GO_COMMIT="$(git -C third_party/amneziawg-go rev-parse HEAD)"
+          test "$ACTUAL_GO_COMMIT" = "$EXPECTED_GO_COMMIT"
+
+          echo "AMNEZIAWG_GO_COMMIT=$ACTUAL_GO_COMMIT" >> "$GITHUB_ENV"
+          echo "Verified AmneziaWG Go tag v3.1.20260828: $ACTUAL_GO_COMMIT"
+
+      - name: Download and verify AmneziaWG Tools 3.1 source
+        shell: bash
         run: |
           set -euo pipefail
+
+          EXPECTED_TOOLS_COMMIT="ee0f0a9aa34ff0a0da4b3433b9512781cfe02843"
+          EXPECTED_TOOLS_SHA256="22438f231d39ea27e4bdc69707ec3103357f3cecc9ad3eecba18a61e5b39c9b9"
 
           git clone --depth 1 --branch v3.1.20260812 \
             https://github.com/amnezia-vpn/amneziawg-tools.git \
             /tmp/awg-tools
 
-          TOOLS_COMMIT="$(git -C /tmp/awg-tools rev-parse HEAD)"
+          ACTUAL_TOOLS_COMMIT="$(git -C /tmp/awg-tools rev-parse HEAD)"
+          test "$ACTUAL_TOOLS_COMMIT" = "$EXPECTED_TOOLS_COMMIT"
 
           curl --fail --location --retry 3 \
-            "https://github.com/amnezia-vpn/amneziawg-tools/archive/${TOOLS_COMMIT}.tar.gz" \
-            --output /tmp/awg-tools.tar.gz
+            "https://github.com/amnezia-vpn/amneziawg-tools/archive/${ACTUAL_TOOLS_COMMIT}.tar.gz" \
+            --output "dist/${ACTUAL_TOOLS_COMMIT}.tar.gz"
 
-          TOOLS_SHA256="$(sha256sum /tmp/awg-tools.tar.gz | awk '{print $1}')"
+          echo "${EXPECTED_TOOLS_SHA256}  dist/${ACTUAL_TOOLS_COMMIT}.tar.gz" \
+            | sha256sum --check --status
 
-          echo "AMNEZIAWG_TOOLS_COMMIT=$TOOLS_COMMIT" >> "$GITHUB_ENV"
-          echo "AMNEZIAWG_TOOLS_SHA256=$TOOLS_SHA256" >> "$GITHUB_ENV"
+          echo "AMNEZIAWG_TOOLS_COMMIT=$ACTUAL_TOOLS_COMMIT" >> "$GITHUB_ENV"
+          echo "AMNEZIAWG_TOOLS_SHA256=$EXPECTED_TOOLS_SHA256" >> "$GITHUB_ENV"
 
-      - name: Update package version
+          echo "Verified AmneziaWG Tools tag v3.1.20260812: $ACTUAL_TOOLS_COMMIT"
+          sha256sum "dist/${ACTUAL_TOOLS_COMMIT}.tar.gz"
+
+      - name: Pin AmneziaWG Tools package source
+        shell: bash
         run: |
           set -euo pipefail
 
-          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=3.1.20260812/' \
-            packaging/entware/chur-amneziawg-tools/Makefile
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-          sed -i 's/^PKG_RELEASE:=.*/PKG_RELEASE:=1/' \
-            packaging/entware/chur-amneziawg-tools/Makefile
+          path = Path("packaging/entware/chur-amneziawg-tools/Makefile")
+          text = path.read_text()
 
-      - name: Build Chur binaries
+          replacements = {
+              r"^CHUR_AMNEZIAWG_TOOLS_COMMIT\?=.*$":
+                  "CHUR_AMNEZIAWG_TOOLS_COMMIT?=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
+              r"^CHUR_AMNEZIAWG_TOOLS_SHA256\?=.*$":
+                  "CHUR_AMNEZIAWG_TOOLS_SHA256?=22438f231d39ea27e4bdc69707ec3103357f3cecc9ad3eecba18a61e5b39c9b9",
+              r"^PKG_VERSION:=.*$":
+                  "PKG_VERSION:=3.1.20260812",
+              r"^PKG_RELEASE:=.*$":
+                  "PKG_RELEASE:=1",
+          }
+
+          for pattern, replacement in replacements.items():
+              text, count = re.subn(
+                  pattern, replacement, text, flags=re.MULTILINE
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Expected exactly one Makefile line for {pattern!r}; found {count}"
+                  )
+
+          required = [
+              "CHUR_AMNEZIAWG_TOOLS_COMMIT?=ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
+              "CHUR_AMNEZIAWG_TOOLS_SHA256?=22438f231d39ea27e4bdc69707ec3103357f3cecc9ad3eecba18a61e5b39c9b9",
+              "PKG_VERSION:=3.1.20260812",
+              "PKG_RELEASE:=1",
+          ]
+
+          for line in required:
+              if line not in text:
+                  raise SystemExit(f"Makefile update did not persist: {line}")
+
+          path.write_text(text)
+
+          print("Pinned package recipe:")
+          for line in text.splitlines():
+              if any(key in line for key in (
+                  "CHUR_AMNEZIAWG_TOOLS_COMMIT",
+                  "CHUR_AMNEZIAWG_TOOLS_SHA256",
+                  "PKG_VERSION:=",
+                  "PKG_RELEASE:",
+              )):
+                  print(line)
+          PY
+
+      - name: Build Chur binaries for MIPSel
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -73,7 +153,8 @@ jobs:
           make AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
             build_runtime_amneziawg_go_entware_mipsel-3.4
 
-      - name: Verify MIPSel binaries
+      - name: Verify Chur MIPSel binaries
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -86,34 +167,173 @@ jobs:
           test -x "$MANAGER"
           test -x "$AWG_GO"
 
-          file "$MANAGER"
-          file "$AWG_GO"
+          verify_mipsel_elf() {
+            local binary="$1"
+            local header
 
-          readelf -h "$MANAGER"
-          readelf -h "$AWG_GO"
+            header="$(readelf -h "$binary")"
+
+            grep -Eq 'Class:[[:space:]]+ELF32' <<< "$header"
+            grep -Fq 'little endian' <<< "$header"
+            grep -Eq 'Machine:[[:space:]]+MIPS' <<< "$header"
+
+            echo "Verified MIPS little-endian ELF32: $binary"
+          }
+
+          file "$MANAGER" "$AWG_GO"
+
+          verify_mipsel_elf "$MANAGER"
+          verify_mipsel_elf "$AWG_GO"
+
+      # Ubuntu 20.04 defaults to GCC 9.
+      # Entware prerequisites require GCC/G++ 10 or newer.
+      - name: Add GCC 10 and host development headers to Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat >> docker/entware-build/Dockerfile <<'DOCKER'
+
+          RUN apt-get update \
+           && apt-get install -y --no-install-recommends \
+                gcc-10 \
+                g++-10 \
+                libc6-dev \
+                libncurses-dev \
+                gettext \
+           && install -d /usr/local/bin \
+           && ln -sfn /usr/bin/gcc-10 /usr/local/bin/gcc \
+           && ln -sfn /usr/bin/g++-10 /usr/local/bin/g++ \
+           && ln -sfn /usr/bin/gcc-10 /usr/local/bin/cc \
+           && ln -sfn /usr/bin/g++-10 /usr/local/bin/c++ \
+           && gcc -dumpversion | grep -Eq '^10([.]|$)' \
+           && g++ -dumpversion | grep -Eq '^10([.]|$)' \
+           && rm -rf /var/lib/apt/lists/*
+
+          ENV PATH="/usr/local/bin:${PATH}"
+          DOCKER
+
+          tail -n 30 docker/entware-build/Dockerfile
 
       - name: Build Entware Docker image
+        shell: bash
         run: |
           set -euo pipefail
 
           docker build \
+            --no-cache \
             -t chur-entware-build:20.04 \
             docker/entware-build
 
-      - name: Checkout Entware source
+      - name: Verify GCC 10 and headers as build user
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            -e HOST_UID=1001 \
+            -e HOST_GID=1001 \
+            chur-entware-build:20.04 bash -s <<'CONTAINER'
+
+          set -euo pipefail
+
+          groupadd -g "$HOST_GID" churbuild 2>/dev/null || true
+
+          useradd -u "$HOST_UID" -g "$HOST_GID" \
+            -M -d /tmp -s /bin/bash churbuild 2>/dev/null || true
+
+          cat > /tmp/check-host-build-tools.sh <<'CHECK'
+          #!/bin/bash
+          set -euo pipefail
+
+          export PATH=/usr/local/bin:/usr/bin:/bin
+
+          echo "Build user: $(id)"
+          echo "PATH=$PATH"
+
+          command -v gcc
+          command -v g++
+
+          GCC_MAJOR="$(gcc -dumpversion | cut -d. -f1)"
+          GXX_MAJOR="$(g++ -dumpversion | cut -d. -f1)"
+
+          [[ "$GCC_MAJOR" =~ ^[0-9]+$ ]]
+          [[ "$GXX_MAJOR" =~ ^[0-9]+$ ]]
+
+          (( GCC_MAJOR >= 10 ))
+          (( GXX_MAJOR >= 10 ))
+
+          {
+            printf '%s\n' \
+              '#include <argp.h>' \
+              '#include <fts.h>' \
+              '#include <obstack.h>' \
+              '#include <libintl.h>' \
+              '#include <ncurses.h>' \
+              'int main(void) { return 0; }'
+          } | gcc -x c -fsyntax-only -
+
+          printf '%s\n' \
+            '#include <ncurses.h>' \
+            'int main(void) { initscr(); endwin(); return 0; }' \
+            | gcc -x c -o /tmp/chur-ncurses-check - -lncurses
+
+          printf '%s\n' \
+            '#include <iostream>' \
+            'int main() { return 0; }' \
+            | g++ -x c++ -fsyntax-only -
+
+          echo "GCC/G++ and host headers verified for build user"
+          CHECK
+
+          chmod 755 /tmp/check-host-build-tools.sh
+          chown "$HOST_UID:$HOST_GID" /tmp/check-host-build-tools.sh
+
+          su churbuild -s /bin/bash /tmp/check-host-build-tools.sh
+
+          CONTAINER
+
+      - name: Resolve and pin Entware source commit
+        id: entware-ref
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_LINE="$(
+            git ls-remote \
+              https://github.com/Entware/Entware.git \
+              refs/heads/master
+          )"
+
+          read -r ENTWARE_COMMIT ENTWARE_REF <<< "$REF_LINE"
+
+          [[ "$ENTWARE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$ENTWARE_REF" = "refs/heads/master"
+
+          echo "commit=$ENTWARE_COMMIT" >> "$GITHUB_OUTPUT"
+
+          echo "Entware master pinned for this run: $ENTWARE_COMMIT"
+
+      - name: Checkout pinned Entware source
         uses: actions/checkout@v4
         with:
           repository: Entware/Entware
+          ref: ${{ steps.entware-ref.outputs.commit }}
           path: entware-src
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Prepare Entware Docker volume
+        shell: bash
         run: |
           set -euo pipefail
 
           VOLUME="chur-entware-mipsel-3.4-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           echo "ENTWARE_DOCKER_VOLUME=$VOLUME" >> "$GITHUB_ENV"
+
+          test "$(git -C entware-src rev-parse HEAD)" = \
+            "${{ steps.entware-ref.outputs.commit }}"
 
           docker volume create "$VOLUME" >/dev/null
 
@@ -127,58 +347,89 @@ jobs:
               set -euo pipefail
 
               test -d /seed/.git
+
               cp -a /seed/. /entware/
+
               chown -R "$HOST_UID:$HOST_GID" /entware
+
               test -d /entware/.git
 
-              echo "Entware source prepared"
+              echo "Entware source successfully prepared"
+              git -C /entware rev-parse HEAD
             '
 
-      - name: Apply FORCE to Entware build commands
+      - name: Patch Entware build wrapper with verified host compiler paths
+        shell: bash
         run: |
           set -euo pipefail
 
           python3 - <<'PY'
           from pathlib import Path
+          import os
 
           path = Path("scripts/entware-build-volume.sh")
-          source = path.read_text()
+          text = path.read_text()
 
-          commands = [
-              "make defconfig",
-              "make tools/libdeflate/compile V=s",
-              "make tools/sed/compile V=s",
-              "make toolchain/kernel-headers/prepare V=s",
-              "make toolchain/install V=s",
-              "make package/chur/chur-amneziawg-go/compile V=s",
-              "make package/chur/chur-amneziawg-tools/compile V=s",
-              "make package/chur/chur-keenetic/compile V=s",
-              "make package/chur/chur-amneziawg/compile V=s",
-          ]
+          marker = (
+              "ENTWARE_DIR=/entware sh /src/scripts/entware-prepare-tree.sh\n"
+          )
 
-          for command in commands:
-              if command not in source:
-                  raise SystemExit(f"Expected command not found: {command}")
-
-              source = source.replace(
-                  command,
-                  command.replace("make ", "make FORCE=1 ", 1),
-                  1
+          if text.count(marker) != 2:
+              raise SystemExit(
+                  "Expected the two known Entware prepare-tree calls; "
+                  "refusing to patch blindly"
               )
 
-          path.write_text(source)
+          commit = os.environ["AMNEZIAWG_TOOLS_COMMIT"]
 
-          print("Updated Entware build script:")
-          for line in source.splitlines():
-              if "make FORCE=1" in line:
-                  print(line)
+          archive_line = (
+              f'mkdir -p /entware/dl\n'
+              f'cp -f "/src/dist/{commit}.tar.gz" '
+              f'"/entware/dl/{commit}.tar.gz"\n'
+          )
+
+          insertion = (
+              marker
+              + "export PATH=/usr/local/bin:/usr/bin:/bin\n"
+              + "mkdir -p /entware/staging_dir/host/bin\n"
+              + "ln -sfn /usr/local/bin/gcc "
+                "/entware/staging_dir/host/bin/gcc\n"
+              + "ln -sfn /usr/local/bin/g++ "
+                "/entware/staging_dir/host/bin/g++\n"
+              + archive_line
+          )
+
+          text = text.replace(marker, insertion, 1)
+          path.write_text(text)
+
+          verify = path.read_text()
+
+          for required in (
+              "/entware/staging_dir/host/bin/gcc",
+              "/entware/staging_dir/host/bin/g++",
+              f"/src/dist/{commit}.tar.gz",
+          ):
+              if required not in verify:
+                  raise SystemExit(
+                      f"Wrapper patch verification failed: {required}"
+                  )
+
+          print(
+              "Wrapper patched and verified; "
+              "no prerequisite override is enabled."
+          )
           PY
 
+          sh -n scripts/entware-build-volume.sh
+
       - name: Build MIPSel IPK packages
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "Starting Entware build with FORCE=1..."
+          mkdir -p dist/entware-ipk
+
+          set -o pipefail
 
           ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
@@ -187,22 +438,229 @@ jobs:
           AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
           AMNEZIAWG_TOOLS_COMMIT="$AMNEZIAWG_TOOLS_COMMIT" \
           AMNEZIAWG_TOOLS_SHA256="$AMNEZIAWG_TOOLS_SHA256" \
-          sh -x scripts/entware-build-volume.sh
+          sh -x scripts/entware-build-volume.sh \
+            2>&1 | tee dist/entware-build.log
 
-      - name: Verify packages
+      - name: Verify IPK metadata and AWG binaries
         if: success()
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "Generated packages:"
-          find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
+          python3 - <<'PY'
+          from pathlib import Path
+          from io import BytesIO
+          import subprocess
+          import tarfile
+          import tempfile
 
-          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
-          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-tools*.ipk' -print -quit)"
-          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg_*.ipk' -print -quit)"
-          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-keenetic*.ipk' -print -quit)"
+          root = Path("dist/entware-ipk")
+          packages = list(root.glob("*.ipk"))
 
-      - name: Upload build artifacts
+          if not packages:
+              raise SystemExit("No IPK packages were generated")
+
+          required = {
+              "chur-amneziawg-go",
+              "chur-amneziawg-tools",
+              "chur-amneziawg",
+              "chur-keenetic",
+          }
+
+          found = {}
+
+          def ar_member(package: Path, prefix: str) -> bytes:
+              members = subprocess.check_output(
+                  ["ar", "t", str(package)],
+                  text=True,
+              ).splitlines()
+
+              name = next(
+                  (item for item in members if item.startswith(prefix)),
+                  None,
+              )
+
+              if name is None:
+                  raise SystemExit(
+                      f"{package.name}: missing {prefix} archive"
+                  )
+
+              return subprocess.check_output(
+                  ["ar", "p", str(package), name]
+              )
+
+          def read_control(package: Path) -> dict[str, str]:
+              blob = ar_member(package, "control.tar")
+
+              with tarfile.open(
+                  fileobj=BytesIO(blob),
+                  mode="r:*",
+              ) as archive:
+                  member = next(
+                      (
+                          item for item in archive.getmembers()
+                          if item.name.lstrip("./") == "control"
+                      ),
+                      None,
+                  )
+
+                  if member is None:
+                      raise SystemExit(
+                          f"{package.name}: control file missing"
+                      )
+
+                  stream = archive.extractfile(member)
+
+                  if stream is None:
+                      raise SystemExit(
+                          f"{package.name}: cannot read control file"
+                      )
+
+                  raw = stream.read().decode()
+
+              fields = {}
+
+              for line in raw.splitlines():
+                  if line and not line[0].isspace() and ":" in line:
+                      key, value = line.split(":", 1)
+                      fields[key] = value.strip()
+
+              return fields
+
+          for package in packages:
+              fields = read_control(package)
+              name = fields.get("Package", "")
+
+              if name in required:
+                  if name in found:
+                      raise SystemExit(
+                          f"Duplicate package found: {name}"
+                      )
+
+                  found[name] = (package, fields)
+
+          missing = required - found.keys()
+
+          if missing:
+              raise SystemExit(
+                  f"Required packages missing: {sorted(missing)}"
+              )
+
+          for name, (package, fields) in sorted(found.items()):
+              arch = fields.get("Architecture", "")
+
+              if name == "chur-amneziawg":
+                  if arch not in ("all", "mipsel-3.4"):
+                      raise SystemExit(
+                          f"Unexpected {name} architecture: {arch}"
+                      )
+              elif arch != "mipsel-3.4":
+                  raise SystemExit(
+                      f"Unexpected {name} architecture: {arch}"
+                  )
+
+              print(
+                  f"{name}: version={fields.get('Version')} "
+                  f"arch={arch} file={package.name}"
+              )
+
+          tools_version = found["chur-amneziawg-tools"][1].get(
+              "Version", ""
+          )
+
+          if not tools_version.startswith("3.1.20260812-1"):
+              raise SystemExit(
+                  f"Unexpected AWG tools package version: {tools_version}"
+              )
+
+          def read_data_files(package: Path) -> dict[str, bytes]:
+              blob = ar_member(package, "data.tar")
+              result = {}
+
+              with tarfile.open(
+                  fileobj=BytesIO(blob),
+                  mode="r:*",
+              ) as archive:
+                  for item in archive.getmembers():
+                      normalized = item.name.lstrip("./")
+
+                      if normalized in (
+                          "opt/bin/amneziawg-go",
+                          "opt/bin/awg",
+                          "opt/bin/awg-quick",
+                      ):
+                          stream = archive.extractfile(item)
+
+                          if stream is not None:
+                              result[normalized] = stream.read()
+
+              return result
+
+          go_files = read_data_files(
+              found["chur-amneziawg-go"][0]
+          )
+
+          tools_files = read_data_files(
+              found["chur-amneziawg-tools"][0]
+          )
+
+          if "opt/bin/amneziawg-go" not in go_files:
+              raise SystemExit(
+                  "Go package does not contain /opt/bin/amneziawg-go"
+              )
+
+          if "opt/bin/awg" not in tools_files:
+              raise SystemExit(
+                  "Tools package does not contain /opt/bin/awg"
+              )
+
+          if "opt/bin/awg-quick" not in tools_files:
+              raise SystemExit(
+                  "Tools package does not contain /opt/bin/awg-quick"
+              )
+
+          def verify_elf(name: str, content: bytes) -> None:
+              with tempfile.NamedTemporaryFile(
+                  prefix="awg-check-"
+              ) as temp:
+                  temp.write(content)
+                  temp.flush()
+
+                  header = subprocess.check_output(
+                      ["readelf", "-h", temp.name],
+                      text=True,
+                  )
+
+              checks = (
+                  "ELF32" in header,
+                  "little endian" in header,
+                  "Machine:" in header and "MIPS" in header,
+              )
+
+              if not all(checks):
+                  raise SystemExit(
+                      f"{name} is not ELF32 MIPS little-endian"
+                  )
+
+              print(
+                  f"Verified package binary: {name} "
+                  "(ELF32 MIPS little-endian)"
+              )
+
+          verify_elf(
+              "amneziawg-go",
+              go_files["opt/bin/amneziawg-go"],
+          )
+
+          verify_elf(
+              "awg",
+              tools_files["opt/bin/awg"],
+          )
+
+          print("All four IPK packages and both AWG executables verified.")
+          PY
+
+      - name: Upload MIPSel IPK packages
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -210,3 +668,14 @@ jobs:
           path: dist/entware-ipk/*.ipk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: awg31-build-diagnostics
+          path: |
+            dist/entware-build.log
+            dist/*.tar.gz
+          if-no-files-found: ignore
+          retention-days: 7
