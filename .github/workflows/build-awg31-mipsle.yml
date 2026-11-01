@@ -53,7 +53,7 @@ jobs:
           echo "AMNEZIAWG_TOOLS_COMMIT=$TOOLS_COMMIT" >> "$GITHUB_ENV"
           echo "AMNEZIAWG_TOOLS_SHA256=$TOOLS_SHA256" >> "$GITHUB_ENV"
 
-          echo "Selected AmneziaWG Tools commit: $TOOLS_COMMIT"
+          echo "Selected Tools commit: $TOOLS_COMMIT"
           echo "Source SHA256: $TOOLS_SHA256"
 
       - name: Update package version
@@ -108,6 +108,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          ENV_FILE=./.env \
           ENTWARE_TARGET_CONFIG=mipsel-3.4 \
           AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
           AMNEZIAWG_TOOLS_COMMIT="$AMNEZIAWG_TOOLS_COMMIT" \
@@ -119,11 +120,15 @@ jobs:
           set -euo pipefail
 
           echo "Generated packages:"
+
           find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
 
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
+
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-tools*.ipk' -print -quit)"
+
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg_*.ipk' -print -quit)"
+
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-keenetic*.ipk' -print -quit)"
 
       - name: Upload build artifacts
