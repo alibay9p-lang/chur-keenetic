@@ -130,25 +130,29 @@ jobs:
               set -euo pipefail
 
               test -d /seed/.git
+
               cp -a /seed/. /entware/
+
               chown -R "$HOST_UID:$HOST_GID" /entware
+
               test -d /entware/.git
 
               echo "Entware source successfully prepared"
             '
 
-      - name: Build MIPSel IPK packages - DEBUG
+      - name: Build MIPSel IPK packages
         run: |
           set -euo pipefail
 
-          echo "Checking Entware volume..."
-          docker volume inspect "$ENTWARE_DOCKER_VOLUME"
+          echo "Enabling Entware FORCE override..."
 
-          echo "Checking required binaries..."
-          ls -lh dist/chur_*_entware_mipsel-3.4
-          ls -lh dist/amneziawg-go_*_entware_mipsel-3.4
+          sed -i '/^set -euo pipefail$/a export FORCE=1' \
+            scripts/entware-build-volume.sh
 
-          echo "Starting detailed package build..."
+          grep -n -A2 'set -euo pipefail' \
+            scripts/entware-build-volume.sh
+
+          echo "Starting Entware package build..."
 
           ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
@@ -165,6 +169,7 @@ jobs:
           set -euo pipefail
 
           echo "Generated packages:"
+
           find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
 
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
