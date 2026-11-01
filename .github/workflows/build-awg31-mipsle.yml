@@ -427,6 +427,15 @@ jobs:
           AMNEZIAWG_TOOLS_SHA256="$AMNEZIAWG_TOOLS_SHA256" \
           sh -x scripts/entware-build-volume.sh 2>&1 | tee dist/entware-build.log
 
+      - name: Preserve built IPK packages before verification
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: awg31-ipk-candidate-unverified
+          path: dist/entware-ipk/*.ipk
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Verify IPK metadata and AWG binaries
         if: success()
         shell: bash
@@ -436,8 +445,8 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path, PurePosixPath
           from io import BytesIO
+          import gzip
           import struct
-          import subprocess
           import tarfile
 
           root = Path("dist/entware-ipk")
@@ -453,94 +462,174 @@ jobs:
           }
           found = {}
 
-          def ar_member(package: Path, prefix: str) -> bytes:
-              members = subprocess.check_output(
-                  ["ar", "t", str(package)], text=True
-              ).splitlines()
-              matches = [name for name in members if name.startswith(prefix)]
-              if len(matches) != 1:
-                  raise SystemExit(
-                      f"{package.name}: expected one {prefix} member, found {matches}"
-                  )
-              return subprocess.check_output(
-                  ["ar", "p", str(package), matches[0]]
-              )
-
           def normalized_member(name: str) -> str:
-              parts = [part for part in PurePosixPath(name).parts if part not in ("/", ".")]
+              # Entware ipkg-build writes archive members with a leading ./.
+              parts = [
+                  part for part in PurePosixPath(name).parts
+                  if part not in ("/", ".", "")
+              ]
               return "/".join(parts)
 
-          def read_control(package: Path) -> dict[str, str]:
-              blob = ar_member(package, "control.tar")
-              with tarfile.open(fileobj=BytesIO(blob), mode="r:*") as archive:
-                  matches = [
-                      member for member in archive.getmembers()
-                      if normalized_member(member.name) == "control"
-                  ]
-                  if len(matches) != 1:
-                      raise SystemExit(f"{package.name}: control file not unique")
-                  stream = archive.extractfile(matches[0])
-                  if stream is None:
-                      raise SystemExit(f"{package.name}: cannot read control file")
-                  raw = stream.read().decode("utf-8")
+          def read_outer_ipk(package: Path) -> dict[str, bytes]:
+              # Entware's ipkg-build creates a gzip-compressed tar archive,
+              # not an ar archive. It contains debian-binary, data.tar.gz,
+              # and control.tar.gz.
+              try:
+                  with tarfile.open(package, mode="r:gz") as archive:
+                      result = {}
+                      for name in ("debian-binary", "control.tar.gz", "data.tar.gz"):
+                          matches = [
+                              member for member in archive.getmembers()
+                              if normalized_member(member.name) == name
+                          ]
+                          if len(matches) != 1:
+                              raise SystemExit(
+                                  f"{package.name}: expected exactly one {name}; "
+                                  f"found {len(matches)}"
+                              )
+                          stream = archive.extractfile(matches[0])
+                          if stream is None:
+                              raise SystemExit(
+                                  f"{package.name}: cannot read {name}"
+                              )
+                          result[name] = stream.read()
+              except (tarfile.TarError, OSError, EOFError) as exc:
+                  raise SystemExit(
+                      f"{package.name}: not a valid Entware gzip-tar IPK: {exc}"
+                  ) from exc
 
+              if result["debian-binary"].strip() != b"2.0":
+                  raise SystemExit(
+                      f"{package.name}: unsupported debian-binary marker"
+                  )
+              return result
+
+          def read_inner_file(blob: bytes, wanted: str, package: Path) -> bytes:
+              try:
+                  with tarfile.open(fileobj=BytesIO(blob), mode="r:gz") as archive:
+                      matches = [
+                          member for member in archive.getmembers()
+                          if normalized_member(member.name) == wanted
+                      ]
+                      if len(matches) != 1:
+                          raise SystemExit(
+                              f"{package.name}: expected exactly one {wanted}; "
+                              f"found {len(matches)}"
+                          )
+                      if not matches[0].isfile():
+                          raise SystemExit(
+                              f"{package.name}: {wanted} is not a regular file"
+                          )
+                      stream = archive.extractfile(matches[0])
+                      if stream is None:
+                          raise SystemExit(
+                              f"{package.name}: cannot read {wanted}"
+                          )
+                      return stream.read()
+              except (tarfile.TarError, OSError, EOFError) as exc:
+                  raise SystemExit(
+                      f"{package.name}: invalid compressed archive {wanted}: {exc}"
+                  ) from exc
+
+          def read_control(package: Path, outer: dict[str, bytes]) -> dict[str, str]:
+              raw = read_inner_file(outer["control.tar.gz"], "control", package)
+              text = raw.decode("utf-8")
               fields = {}
-              for line in raw.splitlines():
+              for line in text.splitlines():
                   if line and not line[0].isspace() and ":" in line:
                       key, value = line.split(":", 1)
                       fields[key] = value.strip()
               return fields
 
+          outer_archives = {}
           for package in packages:
-              fields = read_control(package)
+              outer = read_outer_ipk(package)
+              fields = read_control(package, outer)
               name = fields.get("Package", "")
               if name in required:
                   if name in found:
                       raise SystemExit(f"Duplicate IPK package: {name}")
                   found[name] = (package, fields)
+                  outer_archives[name] = outer
 
           missing = required - found.keys()
           if missing:
-              raise SystemExit(f"Required IPK packages missing: {sorted(missing)}")
+              raise SystemExit(
+                  f"Required IPK packages missing: {sorted(missing)}"
+              )
 
           for name, (package, fields) in sorted(found.items()):
               arch = fields.get("Architecture", "")
               if name == "chur-amneziawg":
                   if arch not in ("all", "mipsel-3.4"):
-                      raise SystemExit(f"Unexpected {name} architecture: {arch}")
+                      raise SystemExit(
+                          f"Unexpected {name} architecture: {arch}"
+                      )
               elif arch != "mipsel-3.4":
-                  raise SystemExit(f"Unexpected {name} architecture: {arch}")
+                  raise SystemExit(
+                      f"Unexpected {name} architecture: {arch}"
+                  )
+
+              if not fields.get("Version"):
+                  raise SystemExit(f"{package.name}: Version field missing")
+
               print(
-                  f"{name}: version={fields.get('Version')} "
+                  f"{name}: version={fields['Version']} "
                   f"architecture={arch} file={package.name}"
               )
 
           tools_version = found["chur-amneziawg-tools"][1].get("Version", "")
           if tools_version != "3.1.20260812-1":
               raise SystemExit(
-                  f"Expected exact AWG Tools version 3.1.20260812-1, got {tools_version!r}"
+                  "Expected exact AWG Tools version 3.1.20260812-1, "
+                  f"got {tools_version!r}"
               )
 
-          def read_data_files(package: Path) -> dict[str, bytes]:
-              blob = ar_member(package, "data.tar")
+          go_version = found["chur-amneziawg-go"][1].get("Version", "")
+          expected_go_version = "b5928ef-1"
+          if go_version != expected_go_version:
+              raise SystemExit(
+                  f"Expected AWG Go package version {expected_go_version}, "
+                  f"got {go_version!r}"
+              )
+
+          def read_data_files(package: Path, outer: dict[str, bytes]) -> dict[str, bytes]:
+              blob = outer["data.tar.gz"]
               result = {}
-              with tarfile.open(fileobj=BytesIO(blob), mode="r:*") as archive:
-                  for member in archive.getmembers():
-                      name = normalized_member(member.name)
-                      if name in {
-                          "opt/bin/amneziawg-go",
-                          "opt/bin/awg",
-                          "opt/bin/awg-quick",
-                      }:
-                          stream = archive.extractfile(member)
-                          if stream is not None:
-                              if name in result:
-                                  raise SystemExit(f"Duplicate package file: {name}")
-                              result[name] = stream.read()
+              try:
+                  with tarfile.open(fileobj=BytesIO(blob), mode="r:gz") as archive:
+                      for member in archive.getmembers():
+                          name = normalized_member(member.name)
+                          if name in {
+                              "opt/bin/amneziawg-go",
+                              "opt/bin/awg",
+                              "opt/bin/awg-quick",
+                          }:
+                              if not member.isfile():
+                                  raise SystemExit(
+                                      f"{package.name}: {name} is not a regular file"
+                                  )
+                              stream = archive.extractfile(member)
+                              if stream is not None:
+                                  if name in result:
+                                      raise SystemExit(
+                                          f"Duplicate package file: {name}"
+                                      )
+                                  result[name] = stream.read()
+              except (tarfile.TarError, OSError, EOFError) as exc:
+                  raise SystemExit(
+                      f"{package.name}: invalid data.tar.gz: {exc}"
+                  ) from exc
               return result
 
-          go_files = read_data_files(found["chur-amneziawg-go"][0])
-          tools_files = read_data_files(found["chur-amneziawg-tools"][0])
+          go_files = read_data_files(
+              found["chur-amneziawg-go"][0],
+              outer_archives["chur-amneziawg-go"],
+          )
+          tools_files = read_data_files(
+              found["chur-amneziawg-tools"][0],
+              outer_archives["chur-amneziawg-tools"],
+          )
 
           expected_go = "opt/bin/amneziawg-go"
           expected_awg = "opt/bin/awg"
@@ -552,24 +641,45 @@ jobs:
               (expected_quick, tools_files),
           ):
               if expected not in archive_files:
-                  raise SystemExit(f"Missing binary/script in IPK: {expected}")
+                  raise SystemExit(
+                      f"Missing binary/script in IPK: {expected}"
+                  )
 
           def verify_mipsel_elf(name: str, data: bytes) -> None:
-              if len(data) < 20 or data[:4] != b"\x7fELF":
-                  raise SystemExit(f"{name}: not an ELF executable")
+              if len(data) < 52 or data[:4] != b"\x7fELF":
+                  raise SystemExit(f"{name}: not a valid ELF executable")
               if data[4] != 1:
                   raise SystemExit(f"{name}: expected ELF32 (EI_CLASS=1)")
               if data[5] != 1:
-                  raise SystemExit(f"{name}: expected little-endian (EI_DATA=1)")
+                  raise SystemExit(
+                      f"{name}: expected little-endian (EI_DATA=1)"
+                  )
+              if data[6] != 1:
+                  raise SystemExit(f"{name}: unsupported ELF version")
               machine = struct.unpack_from("<H", data, 18)[0]
               if machine != 8:
-                  raise SystemExit(f"{name}: expected EM_MIPS (8), got {machine}")
-              print(f"Verified {name}: ELF32, little-endian, EM_MIPS")
+                  raise SystemExit(
+                      f"{name}: expected EM_MIPS (8), got {machine}"
+                  )
+              print(
+                  f"Verified {name}: ELF32, little-endian, EM_MIPS"
+              )
 
           verify_mipsel_elf("amneziawg-go", go_files[expected_go])
           verify_mipsel_elf("awg", tools_files[expected_awg])
 
-          print("All four IPK package metadata records and both AWG ELF binaries verified.")
+          awg_quick_data = tools_files[expected_quick]
+          if not awg_quick_data.startswith(b"#!"):
+              raise SystemExit("awg-quick: missing interpreter shebang")
+          if b"/opt/bin/bash" not in awg_quick_data.splitlines()[0]:
+              raise SystemExit(
+                  "awg-quick: expected Entware interpreter /opt/bin/bash"
+              )
+
+          print(
+              "All four Entware IPK archives, package metadata, "
+              "and both AWG ELF binaries verified."
+          )
           PY
 
       - name: Upload MIPSel IPK packages
