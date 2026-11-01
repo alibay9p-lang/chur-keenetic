@@ -1,0 +1,81 @@
+
+name: Build AmneziaWG Go only for Keenetic MIPSel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Go 1.26.10
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Verify source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="b5928efb6ca19f0153958460c3d141f04abc5c2e"
+
+          git -C third_party/amneziawg-go fetch --tags --force
+
+          ACTUAL="$(git -C third_party/amneziawg-go rev-parse 'v3.1.20260828^{commit}')"
+
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo "ERROR: Unexpected AmneziaWG commit: $ACTUAL"
+            exit 1
+          fi
+
+          git -C third_party/amneziawg-go checkout --detach "$EXPECTED"
+
+          echo "Verified source: $ACTUAL"
+
+      - name: Build only MIPSel AmneziaWG Go
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          make \
+            AMNEZIAWG_GO_COMMIT=b5928efb6ca19f0153958460c3d141f04abc5c2e \
+            build_runtime_amneziawg_go_entware_mipsel-3.4
+
+      - name: Verify binary architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BINARY="dist/amneziawg-go_b5928ef_entware_mipsel-3.4"
+
+          test -x "$BINARY"
+
+          readelf -h "$BINARY" | grep -q 'ELF32'
+          readelf -h "$BINARY" | grep -q 'little endian'
+          readelf -h "$BINARY" | grep -q 'MIPS'
+
+          sha256sum "$BINARY"
+
+          echo "MIPSel binary verified."
+
+      - name: Upload standalone binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: awg31-go-only-mipsel
+          path: dist/amneziawg-go_b5928ef_entware_mipsel-3.4
+          if-no-files-found: error
+          retention-days: 14
