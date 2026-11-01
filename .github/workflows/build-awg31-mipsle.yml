@@ -95,6 +95,21 @@ jobs:
           readelf -h "$MANAGER"
           readelf -h "$AWG_GO"
 
+      - name: Prepare Entware Dockerfile
+        run: |
+          set -euo pipefail
+
+          cat >> docker/entware-build/Dockerfile <<'DOCKER'
+
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+              gcc \
+              g++ \
+              libc6-dev \
+              gettext \
+              libncurses-dev \
+           && rm -rf /var/lib/apt/lists/*
+          DOCKER
+
       - name: Build Entware Docker image
         run: |
           set -euo pipefail
@@ -102,6 +117,30 @@ jobs:
           docker build \
             -t chur-entware-build:20.04 \
             docker/entware-build
+
+      - name: Verify Docker build environment
+        run: |
+          set -euo pipefail
+
+          docker run --rm chur-entware-build:20.04 bash -lc '
+            set -eux
+
+            command -v gcc
+            command -v g++
+
+            gcc --version
+            g++ --version
+
+            printf "%s\n" \
+              "#include <argp.h>" \
+              "#include <fts.h>" \
+              "#include <obstack.h>" \
+              "#include <libintl.h>" \
+              "int main(void) { return 0; }" \
+              | gcc -x c -fsyntax-only -
+
+            echo "Compiler and headers: OK"
+          '
 
       - name: Checkout Entware source
         uses: actions/checkout@v4
@@ -144,15 +183,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Enabling Entware FORCE override..."
+          echo "Applying FORCE=1 to Entware make commands..."
 
-          sed -i '/^set -euo pipefail$/a export FORCE=1' \
+          sed -i -E \
+            's/^([[:space:]]*)make /\1make FORCE=1 /' \
             scripts/entware-build-volume.sh
 
-          grep -n -A2 'set -euo pipefail' \
+          grep -n 'make FORCE=1' \
             scripts/entware-build-volume.sh
 
-          echo "Starting Entware package build..."
+          echo "Starting package build..."
 
           ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
