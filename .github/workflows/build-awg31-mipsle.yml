@@ -54,6 +54,9 @@ jobs:
           echo "AMNEZIAWG_TOOLS_COMMIT=$TOOLS_COMMIT" >> "$GITHUB_ENV"
           echo "AMNEZIAWG_TOOLS_SHA256=$TOOLS_SHA256" >> "$GITHUB_ENV"
 
+          echo "Selected Tools commit: $TOOLS_COMMIT"
+          echo "Source SHA256: $TOOLS_SHA256"
+
       - name: Update package version
         run: |
           set -euo pipefail
@@ -127,34 +130,41 @@ jobs:
               set -euo pipefail
 
               test -d /seed/.git
-
               cp -a /seed/. /entware/
-
               chown -R "$HOST_UID:$HOST_GID" /entware
-
               test -d /entware/.git
 
               echo "Entware source successfully prepared"
             '
 
-      - name: Build MIPSel IPK packages
+      - name: Build MIPSel IPK packages - DEBUG
         run: |
           set -euo pipefail
 
+          echo "Checking Entware volume..."
+          docker volume inspect "$ENTWARE_DOCKER_VOLUME"
+
+          echo "Checking required binaries..."
+          ls -lh dist/chur_*_entware_mipsel-3.4
+          ls -lh dist/amneziawg-go_*_entware_mipsel-3.4
+
+          echo "Starting detailed package build..."
+
+          ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
           ENTWARE_TARGET_CONFIG=mipsel-3.4 \
           ENTWARE_DOCKER_VOLUME="$ENTWARE_DOCKER_VOLUME" \
           AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
           AMNEZIAWG_TOOLS_COMMIT="$AMNEZIAWG_TOOLS_COMMIT" \
           AMNEZIAWG_TOOLS_SHA256="$AMNEZIAWG_TOOLS_SHA256" \
-          make entware_build_ipk_volume
+          sh -x scripts/entware-build-volume.sh
 
       - name: Verify packages
+        if: success()
         run: |
           set -euo pipefail
 
           echo "Generated packages:"
-
           find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
 
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
@@ -166,6 +176,7 @@ jobs:
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-keenetic*.ipk' -print -quit)"
 
       - name: Upload build artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: awg31-keenetic-mipsel-3.4
