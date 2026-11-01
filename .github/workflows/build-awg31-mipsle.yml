@@ -70,8 +70,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          make build_all
-          make build_runtime_amneziawg_go_entware_mipsel-3.4
+          echo "Using AmneziaWG Go commit: $AMNEZIAWG_GO_COMMIT"
+
+          make AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" build_all
+
+          make AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
+            build_runtime_amneziawg_go_entware_mipsel-3.4
 
       - name: Verify MIPSel binaries
         run: |
@@ -94,6 +98,8 @@ jobs:
 
       - name: Build Entware Docker image
         run: |
+          set -euo pipefail
+
           docker build \
             -t chur-entware-build:20.04 \
             docker/entware-build
