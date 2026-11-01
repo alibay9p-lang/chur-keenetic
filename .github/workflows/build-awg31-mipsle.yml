@@ -118,7 +118,7 @@ jobs:
             -t chur-entware-build:20.04 \
             docker/entware-build
 
-      - name: Verify Docker build environment
+      - name: Verify Docker compiler as root
         run: |
           set -euo pipefail
 
@@ -136,10 +136,47 @@ jobs:
               "#include <fts.h>" \
               "#include <obstack.h>" \
               "#include <libintl.h>" \
+              "#include <ncurses.h>" \
               "int main(void) { return 0; }" \
               | gcc -x c -fsyntax-only -
 
-            echo "Compiler and headers: OK"
+            echo "ROOT COMPILER CHECK: OK"
+          '
+
+      - name: Diagnose compiler as churbuild
+        run: |
+          set -euo pipefail
+
+          docker run --rm chur-entware-build:20.04 bash -lc '
+            set -eux
+
+            groupadd -g 1001 churbuild 2>/dev/null || true
+            useradd -u 1001 -g 1001 -M -d /tmp \
+              -s /bin/bash churbuild 2>/dev/null || true
+
+            su churbuild -s /bin/bash -c "
+              set -eux
+
+              id
+              echo PATH=\$PATH
+
+              command -v gcc
+              command -v g++
+
+              gcc --version
+              g++ --version
+
+              printf \"%s\n\" \
+                \"#include <argp.h>\" \
+                \"#include <fts.h>\" \
+                \"#include <obstack.h>\" \
+                \"#include <libintl.h>\" \
+                \"#include <ncurses.h>\" \
+                \"int main(void) { return 0; }\" \
+                | gcc -x c -fsyntax-only -
+
+              echo CHURBUILD COMPILER CHECK: OK
+            "
           '
 
       - name: Checkout Entware source
@@ -183,16 +220,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Applying FORCE=1 to Entware make commands..."
-
-          sed -i -E \
-            's/^([[:space:]]*)make /\1make FORCE=1 /' \
-            scripts/entware-build-volume.sh
-
-          grep -n 'make FORCE=1' \
-            scripts/entware-build-volume.sh
-
-          echo "Starting package build..."
+          echo "Starting detailed Entware build..."
 
           ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
