@@ -12,64 +12,118 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Install cross compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            gcc-mipsel-linux-gnu \
-            binutils-mipsel-linux-gnu \
-            git \
-            make
+      - name: Checkout Chur Keenetic
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.1'
 
-      - name: Prepare output
-        run: mkdir -p dist
-
-      - name: Build AmneziaWG Go 3.1
+      - name: Select AmneziaWG Go 3.1
         run: |
-          git clone --depth 1 --branch v3.1.20260828 \
-            https://github.com/amnezia-vpn/amneziawg-go.git awg-go
+          set -euo pipefail
 
-          cd awg-go
+          git -C third_party/amneziawg-go fetch --tags --force
+          git -C third_party/amneziawg-go checkout --detach v3.1.20260828
 
-          CGO_ENABLED=0 \
-          GOOS=linux \
-          GOARCH=mipsle \
-          GOMIPS=softfloat \
-          go build -trimpath \
-            -ldflags="-s -w" \
-            -o "$GITHUB_WORKSPACE/dist/amneziawg-go" .
+          GO_COMMIT="$(git -C third_party/amneziawg-go rev-parse HEAD)"
+          echo "AMNEZIAWG_GO_COMMIT=$GO_COMMIT" >> "$GITHUB_ENV"
 
-      - name: Build AmneziaWG Tools 3.1
+          echo "Selected AmneziaWG Go commit: $GO_COMMIT"
+
+      - name: Select AmneziaWG Tools 3.1
         run: |
+          set -euo pipefail
+
           git clone --depth 1 --branch v3.1.20260812 \
-            https://github.com/amnezia-vpn/amneziawg-tools.git awg-tools
+            https://github.com/amnezia-vpn/amneziawg-tools.git \
+            /tmp/awg-tools
 
-          make -C awg-tools/src \
-            CC="mipsel-linux-gnu-gcc -mabi=32 -march=mips32r2 -msoft-float" \
-            LDFLAGS="-static"
+          TOOLS_COMMIT="$(git -C /tmp/awg-tools rev-parse HEAD)"
 
-          install -m 755 awg-tools/src/wg dist/awg
-          install -m 755 awg-tools/src/wg-quick/linux.bash dist/awg-quick
+          curl --fail --location --retry 3 \
+            "https://github.com/amnezia-vpn/amneziawg-tools/archive/${TOOLS_COMMIT}.tar.gz" \
+            --output /tmp/awg-tools.tar.gz
 
-      - name: Verify binaries
+          TOOLS_SHA256="$(sha256sum /tmp/awg-tools.tar.gz | awk '{print $1}')"
+
+          echo "AMNEZIAWG_TOOLS_COMMIT=$TOOLS_COMMIT" >> "$GITHUB_ENV"
+          echo "AMNEZIAWG_TOOLS_SHA256=$TOOLS_SHA256" >> "$GITHUB_ENV"
+
+          echo "Selected AmneziaWG Tools commit: $TOOLS_COMMIT"
+          echo "Source SHA256: $TOOLS_SHA256"
+
+      - name: Update package version
         run: |
-          file dist/*
-          readelf -h dist/amneziawg-go
-          readelf -h dist/awg
+          set -euo pipefail
 
-      - name: Create archive
+          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=3.1.20260812/' \
+            packaging/entware/chur-amneziawg-tools/Makefile
+
+          sed -i 's/^PKG_RELEASE:=.*/PKG_RELEASE:=1/' \
+            packaging/entware/chur-amneziawg-tools/Makefile
+
+      - name: Build Chur binaries
         run: |
-          tar -czf awg31-mipsel.tar.gz -C dist .
+          set -euo pipefail
+
+          make build_all
+          make build_runtime_amneziawg_go_entware_mipsel-3.4
+
+      - name: Verify MIPSel binaries
+        run: |
+          set -euo pipefail
+
+          CHUR_VERSION="$(cat VERSION)"
+          GO_SHORT_COMMIT="${AMNEZIAWG_GO_COMMIT:0:7}"
+
+          MANAGER="dist/chur_${CHUR_VERSION}_entware_mipsel-3.4"
+          AWG_GO="dist/amneziawg-go_${GO_SHORT_COMMIT}_entware_mipsel-3.4"
+
+          test -x "$MANAGER"
+          test -x "$AWG_GO"
+
+          file "$MANAGER"
+          file "$AWG_GO"
+
+          readelf -h "$MANAGER"
+          readelf -h "$AWG_GO"
+
+      - name: Build Entware Docker image
+        run: |
+          docker build \
+            -t chur-entware-build:20.04 \
+            docker/entware-build
+
+      - name: Build MIPSel IPK packages
+        run: |
+          set -euo pipefail
+
+          ENTWARE_TARGET_CONFIG=mipsel-3.4 \
+          AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
+          AMNEZIAWG_TOOLS_COMMIT="$AMNEZIAWG_TOOLS_COMMIT" \
+          AMNEZIAWG_TOOLS_SHA256="$AMNEZIAWG_TOOLS_SHA256" \
+          make entware_build_ipk_volume
+
+      - name: Verify packages
+        run: |
+          set -euo pipefail
+
+          echo "Generated packages:"
+          find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
+
+          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
+          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-tools*.ipk' -print -quit)"
+          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg_*.ipk' -print -quit)"
+          test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-keenetic*.ipk' -print -quit)"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: awg31-mipsel
-          path: awg31-mipsel.tar.gz
+          name: awg31-keenetic-mipsel-3.4
+          path: dist/entware-ipk/*.ipk
           if-no-files-found: error
+          retention-days: 14
