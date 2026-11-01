@@ -21,6 +21,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.1'
+          cache: false
 
       - name: Select AmneziaWG Go 3.1
         run: |
@@ -108,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ENV_FILE=./.env \
+          ENV_FILE=/dev/null \
           ENTWARE_TARGET_CONFIG=mipsel-3.4 \
           AMNEZIAWG_GO_COMMIT="$AMNEZIAWG_GO_COMMIT" \
           AMNEZIAWG_TOOLS_COMMIT="$AMNEZIAWG_TOOLS_COMMIT" \
