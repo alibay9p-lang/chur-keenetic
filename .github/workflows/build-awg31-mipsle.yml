@@ -54,9 +54,6 @@ jobs:
           echo "AMNEZIAWG_TOOLS_COMMIT=$TOOLS_COMMIT" >> "$GITHUB_ENV"
           echo "AMNEZIAWG_TOOLS_SHA256=$TOOLS_SHA256" >> "$GITHUB_ENV"
 
-          echo "Selected Tools commit: $TOOLS_COMMIT"
-          echo "Source SHA256: $TOOLS_SHA256"
-
       - name: Update package version
         run: |
           set -euo pipefail
@@ -95,21 +92,6 @@ jobs:
           readelf -h "$MANAGER"
           readelf -h "$AWG_GO"
 
-      - name: Prepare Entware Dockerfile
-        run: |
-          set -euo pipefail
-
-          cat >> docker/entware-build/Dockerfile <<'DOCKER'
-
-          RUN apt-get update && apt-get install -y --no-install-recommends \
-              gcc \
-              g++ \
-              libc6-dev \
-              gettext \
-              libncurses-dev \
-           && rm -rf /var/lib/apt/lists/*
-          DOCKER
-
       - name: Build Entware Docker image
         run: |
           set -euo pipefail
@@ -117,67 +99,6 @@ jobs:
           docker build \
             -t chur-entware-build:20.04 \
             docker/entware-build
-
-      - name: Verify Docker compiler as root
-        run: |
-          set -euo pipefail
-
-          docker run --rm chur-entware-build:20.04 bash -lc '
-            set -eux
-
-            command -v gcc
-            command -v g++
-
-            gcc --version
-            g++ --version
-
-            printf "%s\n" \
-              "#include <argp.h>" \
-              "#include <fts.h>" \
-              "#include <obstack.h>" \
-              "#include <libintl.h>" \
-              "#include <ncurses.h>" \
-              "int main(void) { return 0; }" \
-              | gcc -x c -fsyntax-only -
-
-            echo "ROOT COMPILER CHECK: OK"
-          '
-
-      - name: Diagnose compiler as churbuild
-        run: |
-          set -euo pipefail
-
-          docker run --rm chur-entware-build:20.04 bash -lc '
-            set -eux
-
-            groupadd -g 1001 churbuild 2>/dev/null || true
-            useradd -u 1001 -g 1001 -M -d /tmp \
-              -s /bin/bash churbuild 2>/dev/null || true
-
-            su churbuild -s /bin/bash -c "
-              set -eux
-
-              id
-              echo PATH=\$PATH
-
-              command -v gcc
-              command -v g++
-
-              gcc --version
-              g++ --version
-
-              printf \"%s\n\" \
-                \"#include <argp.h>\" \
-                \"#include <fts.h>\" \
-                \"#include <obstack.h>\" \
-                \"#include <libintl.h>\" \
-                \"#include <ncurses.h>\" \
-                \"int main(void) { return 0; }\" \
-                | gcc -x c -fsyntax-only -
-
-              echo CHURBUILD COMPILER CHECK: OK
-            "
-          '
 
       - name: Checkout Entware source
         uses: actions/checkout@v4
@@ -206,21 +127,58 @@ jobs:
               set -euo pipefail
 
               test -d /seed/.git
-
               cp -a /seed/. /entware/
-
               chown -R "$HOST_UID:$HOST_GID" /entware
-
               test -d /entware/.git
 
-              echo "Entware source successfully prepared"
+              echo "Entware source prepared"
             '
+
+      - name: Apply FORCE to Entware build commands
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/entware-build-volume.sh")
+          source = path.read_text()
+
+          commands = [
+              "make defconfig",
+              "make tools/libdeflate/compile V=s",
+              "make tools/sed/compile V=s",
+              "make toolchain/kernel-headers/prepare V=s",
+              "make toolchain/install V=s",
+              "make package/chur/chur-amneziawg-go/compile V=s",
+              "make package/chur/chur-amneziawg-tools/compile V=s",
+              "make package/chur/chur-keenetic/compile V=s",
+              "make package/chur/chur-amneziawg/compile V=s",
+          ]
+
+          for command in commands:
+              if command not in source:
+                  raise SystemExit(f"Expected command not found: {command}")
+
+              source = source.replace(
+                  command,
+                  command.replace("make ", "make FORCE=1 ", 1),
+                  1
+              )
+
+          path.write_text(source)
+
+          print("Updated Entware build script:")
+          for line in source.splitlines():
+              if "make FORCE=1" in line:
+                  print(line)
+          PY
 
       - name: Build MIPSel IPK packages
         run: |
           set -euo pipefail
 
-          echo "Starting detailed Entware build..."
+          echo "Starting Entware build with FORCE=1..."
 
           ENTWARE_DOCKER_IMAGE="chur-entware-build:20.04" \
           ENV_FILE=/dev/null \
@@ -237,15 +195,11 @@ jobs:
           set -euo pipefail
 
           echo "Generated packages:"
-
           find dist/entware-ipk -maxdepth 1 -type f -name '*.ipk' -print
 
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-go*.ipk' -print -quit)"
-
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg-tools*.ipk' -print -quit)"
-
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-amneziawg_*.ipk' -print -quit)"
-
           test -n "$(find dist/entware-ipk -maxdepth 1 -type f -name '*chur-keenetic*.ipk' -print -quit)"
 
       - name: Upload build artifacts
